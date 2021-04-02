@@ -1,5 +1,6 @@
 <?php
-/**
+/* PJF Redis PageCache
+ * https://github.com/fierevere/pjf-redis-pagecache
  * Redis Cache Dropin for WordPress
  *
  * Create a symbolic link to this file from your wp-content directory and
@@ -15,12 +16,12 @@ class Redis_Page_Cache {
 	private static $redis_port = 6379;
 	private static $redis_db = 0;
 	private static $redis_auth = '';
-
-	private static $ttl = 300;
+	private static $ttl = 900;
 	private static $max_ttl = 3600;
 	private static $unique = array();
 	private static $headers = array();
-	private static $ignore_cookies = array( 'wordpress_test_cookie' );
+	private static $ignore_cookies = array( 'wordpress_test_cookie' ); 
+	private static $nocache_cookies = array ( 'wp', 'wordpress', 'comment_author', 'wp-postpass', 'wordpress_logged_in' );
 	private static $ignore_request_keys = array( 'utm_source', 'utm_medium', 'utm_term', 'utm_content', 'utm_campaign' );
 	private static $whitelist_cookies = null;
 	private static $bail_callback = false;
@@ -45,7 +46,7 @@ class Redis_Page_Cache {
 		// Clear caches in bulk at the end.
 		register_shutdown_function( array( __CLASS__, 'maybe_clear_caches' ) );
 
-		header( 'X-Pj-Cache-Status: miss' );
+		header( 'X-Pjf-Cache-Status: miss' );
 
 		if ( function_exists( 'add_action' ) ) {
 			add_action( 'clean_post_cache', array( __CLASS__, 'clean_post_cache' ) );
@@ -81,7 +82,7 @@ class Redis_Page_Cache {
 
 		// Make sure requests with Authorization: headers are unique.
 		if ( ! empty( $_SERVER['HTTP_AUTHORIZATION'] ) ) {
-			$request_hash['unique']['pj-auth-header'] = $_SERVER['HTTP_AUTHORIZATION'];
+			$request_hash['unique']['pjf-auth-header'] = $_SERVER['HTTP_AUTHORIZATION'];
 		}
 
 		if ( self::$debug ) {
@@ -93,7 +94,7 @@ class Redis_Page_Cache {
 		unset( $request_hash );
 
 		if ( self::$debug ) {
-			header( 'X-Pj-Cache-Key: ' . self::$request_hash );
+			header( 'X-Pjf-Cache-Key: ' . self::$request_hash );
 		}
 
 		$redis = self::get_redis();
@@ -102,8 +103,8 @@ class Redis_Page_Cache {
 
 		// Look for an existing cache entry by request hash.
 		list( $cache, $lock ) = $redis->mGet( array(
-			sprintf( 'pjc-%s', self::$request_hash ),
-			sprintf( 'pjc-%s-lock', self::$request_hash ),
+			sprintf( 'pjf-%s', self::$request_hash ),
+			sprintf( 'pjf-%s-lock', self::$request_hash ),
 		) );
 
 		// Something is in cache.
@@ -111,13 +112,13 @@ class Redis_Page_Cache {
 			$serve_cache = true;
 
 			if ( self::$debug ) {
-				header( 'X-Pj-Cache-Time: ' . $cache['updated'] );
-				header( 'X-Pj-Cache-Flags: ' . implode( ' ', $cache['flags'] ) );
+				header( 'X-Pjf-Cache-Time: ' . $cache['updated'] );
+				header( 'X-Pjf-Cache-Flags: ' . implode( ' ', $cache['flags'] ) );
 			}
 
 			$redis->multi();
-			$redis->zRangeByScore( 'pjc-expired-flags', $cache['updated'], '+inf', array( 'withscores' => true ) );
-			$redis->zRangeByScore( 'pjc-deleted-flags', $cache['updated'], '+inf', array( 'withscores' => true ) );
+			$redis->zRangeByScore( 'pjf-expired-flags', $cache['updated'], '+inf', array( 'withscores' => true ) );
+			$redis->zRangeByScore( 'pjf-deleted-flags', $cache['updated'], '+inf', array( 'withscores' => true ) );
 			list( $expired_flags, $deleted_flags ) = $redis->exec();
 
 			$expired = $cache['updated'] + self::$ttl < time();
@@ -149,7 +150,7 @@ class Redis_Page_Cache {
 
 				// If it's not locked, lock it for regeneration and don't serve from cache.
 				if ( ! $lock ) {
-					$lock = $redis->set( sprintf( 'pjc-%s-lock', self::$request_hash ), true, array( 'nx', 'ex' => 30 ) );
+					$lock = $redis->set( sprintf( 'pjf-%s-lock', self::$request_hash ), true, array( 'nx', 'ex' => 30 ) );
 					if ( $lock ) {
 						if ( self::can_fcgi_regenerate() ) {
 							// Well, actually, if we can serve a stale copy but keep the process running
@@ -166,7 +167,7 @@ class Redis_Page_Cache {
 			if ( $serve_cache && $cache['gzip'] ) {
 				if ( function_exists( 'gzuncompress' ) && self::$gzip ) {
 					if ( self::$debug ) {
-						header( 'X-Pj-Cache-Gzip: true' );
+						header( 'X-Pjf-Cache-Gzip: true' );
 					}
 
 					$cache['output'] = gzuncompress( $cache['output'] );
@@ -179,10 +180,10 @@ class Redis_Page_Cache {
 
 				// If we're regenareting in background, let everyone know.
 				$status = ( self::$fcgi_regenerate ) ? 'expired' : 'hit';
-				header( 'X-Pj-Cache-Status: ' . $status );
+				header( 'X-Pjf-Cache-Status: ' . $status );
 
 				if ( self::$debug )
-					header( sprintf( 'X-Pj-Cache-Expires: %d', self::$ttl - ( time() - $cache['updated'] ) ) );
+					header( sprintf( 'X-Pjf-Cache-Expires: %d', self::$ttl - ( time() - $cache['updated'] ) ) );
 
 				// Output cached status code.
 				if ( ! empty( $cache['status'] ) )
@@ -378,7 +379,7 @@ class Redis_Page_Cache {
 			$key = strtolower( $key );
 
 			// Don't cache anything if these cookies are set.
-			foreach ( array( 'wp', 'wordpress', 'comment_author' ) as $part ) {
+			foreach ( $nocache_cookies as $part ) {
 				if ( strpos( $key, $part ) === 0 && ! in_array( $key, self::$ignore_cookies ) ) {
 					return true;
 				}
@@ -473,7 +474,7 @@ class Redis_Page_Cache {
 			}
 
 			// Never store X-Pj-Cache-* headers in cache.
-			if ( strpos( strtolower( $key ), 'x-pj-cache' ) !== false )
+			if ( strpos( strtolower( $key ), 'x-pjf-cache' ) !== false )
 				continue;
 
 			$data['headers'][] = $header;
@@ -494,13 +495,13 @@ class Redis_Page_Cache {
 
 			if ( $cache ) {
 				// Okay to cache.
-				$redis->set( sprintf( 'pjc-%s', self::$request_hash ), $data );
+				$redis->set( sprintf( 'pjf-%s', self::$request_hash ), $data );
 			} else {
 				// Not okay, so delete any stale entry.
-				$redis->delete( sprintf( 'pjc-%s', self::$request_hash ) );
+				$redis->delete( sprintf( 'pjf-%s', self::$request_hash ) );
 			}
 
-			$redis->delete( sprintf( 'pjc-%s-lock', self::$request_hash ) );
+			$redis->delete( sprintf( 'pjf-%s-lock', self::$request_hash ) );
 			$redis->exec();
 		}
 
@@ -617,10 +618,10 @@ class Redis_Page_Cache {
 		$sets = array();
 
 		if ( ! empty( self::$flags_expire ) )
-			$sets['pjc-expired-flags'] = self::$flags_expire;
+			$sets['pjf-expired-flags'] = self::$flags_expire;
 
 		if ( ! empty( self::$flags_delete ) )
-			$sets['pjc-deleted-flags'] = self::$flags_delete;
+			$sets['pjf-deleted-flags'] = self::$flags_delete;
 
 		if ( empty( $sets ) )
 			return;
@@ -678,11 +679,11 @@ class Redis_Page_Cache {
 	 */
 	public static function _add_action_compat() {
 		// Filters are not yet available, so hi-jack the $wp_filter global to add our actions.
-		$GLOBALS['wp_filter']['clean_post_cache'][10]['pj-page-cache'] = array(
+		$GLOBALS['wp_filter']['clean_post_cache'][10]['pjf-page-cache'] = array(
 			'function' => array( __CLASS__, 'clean_post_cache' ), 'accepted_args' => 1 );
-		$GLOBALS['wp_filter']['transition_post_status'][10]['pj-page-cache'] = array(
+		$GLOBALS['wp_filter']['transition_post_status'][10]['pjf-page-cache'] = array(
 			'function' => array( __CLASS__, 'transition_post_status' ), 'accepted_args' => 3 );
-		$GLOBALS['wp_filter']['template_redirect'][100]['pj-page-cache'] = array(
+		$GLOBALS['wp_filter']['template_redirect'][100]['pjf-page-cache'] = array(
 			'function' => array( __CLASS__, 'template_redirect' ), 'accepted_args' => 1 );
 	}
 }
