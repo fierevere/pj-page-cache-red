@@ -231,6 +231,9 @@ class Redis_Page_Cache {
 			return self::$redis;
 
 		$redis = new Redis;
+		if ( defined( 'WP_REDIS_PATH' ) && WP_REDIS_PATH ) {
+		$connect = $redis->connect(WP_REDIS_PATH); // unix socket support
+		} else
 		$connect = $redis->connect( self::$redis_host, self::$redis_port );
 
 		if ( ! empty( self::$redis_auth ) )
